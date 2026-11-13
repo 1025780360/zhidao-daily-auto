@@ -28,6 +28,7 @@ const COURSES = {
     recruitId: "471937",
     secret: "YOUR_MILITARY_SECRET",
     videoStrategy: "random",
+    aliases: ["军事理论"],
   },
   security: {
     key: "security",
@@ -36,8 +37,30 @@ const COURSES = {
     recruitId: "456322",
     secret: "YOUR_SECURITY_SECRET",
     videoStrategy: "unfinishedFirst",
+    aliases: ["国家安全教育", "国家安全"],
   },
 };
+
+// 课程配置可以用 courses.json（运行时自动抓取）或 config.json 的 courses 字段覆盖
+const COURSES_FILE = `${ROOT}/courses.json`;
+let storedCourses = {};
+try {
+  storedCourses = JSON.parse(await fsp.readFile(COURSES_FILE, "utf8"));
+} catch {}
+for (const key of Object.keys(COURSES)) {
+  const c = storedCourses[key] || (CONFIG.courses && CONFIG.courses[key]);
+  if (!c) continue;
+  for (const f of ["courseId", "recruitId", "secret", "videoStrategy"]) {
+    if (c[f]) COURSES[key][f] = String(c[f]);
+  }
+}
+
+const isBlankConfig = (v) => !v || /^YOUR_/i.test(String(v));
+const configIncomplete = () =>
+  Object.keys(COURSES).some((k) => {
+    const c = COURSES[k];
+    return isBlankConfig(c.courseId) || isBlankConfig(c.recruitId) || isBlankConfig(c.secret);
+  });
 
 const studyUrl = (c) => `https://studyvideoh5.zhihuishu.com/stuStudy?recruitAndCourseId=${c.secret}`;
 const qaUrl = (c) => `https://qah5.zhihuishu.com/qa.html#/web/home/${c.courseId}?role=2&recruitId=${c.recruitId}&fromUrl=2`;
@@ -939,6 +962,152 @@ async function pickPages(task) {
 let state;
 let dayState;
 
+// ---------- 课程配置自动抓取 ----------
+
+async function captureCourse(page) {
+  const url = (await page.url()) || "";
+  const m = url.match(/recruitAndCourseId=([0-9a-f]{8,})/i);
+  if (!m) return null;
+  const info = await page.evaluate(() => {
+    const qa = document.querySelector('a[href*="qah5"]');
+    const href = qa ? qa.href : "";
+    const head = (document.body ? document.body.innerText : "").slice(0, 200);
+    return {
+      courseId: (href.match(/\/home\/(\d+)/) || [])[1] || "",
+      recruitId: (href.match(/recruitId=(\d+)/) || [])[1] || "",
+      head,
+    };
+  });
+  const key = Object.keys(COURSES).find((k) =>
+    (COURSES[k].aliases || [COURSES[k].name]).some((a) => info.head.includes(a)),
+  );
+  return { secret: m[1], courseId: info.courseId, recruitId: info.recruitId, key };
+}
+
+async function saveCoursesConfig() {
+  const out = {};
+  for (const key of Object.keys(COURSES)) {
+    const c = COURSES[key];
+    out[key] = { courseId: c.courseId, recruitId: c.recruitId, secret: c.secret };
+  }
+  try {
+    await fsp.writeFile(COURSES_FILE, JSON.stringify(out, null, 2), "utf8");
+  } catch (e) {
+    log(`课程配置保存失败：${e.message}`);
+  }
+}
+
+async function syncCourses(task) {
+  await writeStatus({ stage: "config", step: "正在抓取当前账号的课程配置" });
+  log("开始抓取当前账号课程配置");
+  const found = new Map();
+  const page = await task.newPage();
+  const listUrl = "https://onlineweb.zhihuishu.com/onlinestuh5";
+
+  // 1) 在线学堂课程列表：点课程名直接进学习页
+  try {
+    await page.goto(listUrl, { timeout: 90000 });
+    await page.waitForTimeout(10000);
+    const login = await page.evaluate(() =>
+      /登录中心|扫码登录|手机号登录/.test(document.body ? document.body.innerText : ""),
+    );
+    if (login) {
+      log("学堂课程列表未登录，改从已打开的课程学习页抓取");
+    } else {
+      for (const key of Object.keys(COURSES)) {
+        const aliases = COURSES[key].aliases || [COURSES[key].name];
+        const clicked = await page.evaluate((al) => {
+          const el = [...document.querySelectorAll(".courseName")].find((e) =>
+            al.some((a) => (e.textContent || "").includes(a)),
+          );
+          if (!el) return false;
+          el.click();
+          if (el.parentElement) el.parentElement.click();
+          return true;
+        }, aliases);
+        if (!clicked) {
+          log(`课程列表里没找到 ${COURSES[key].name}`);
+          continue;
+        }
+        await page.waitForTimeout(8000);
+        const cap = await captureCourse(page);
+        if (cap && cap.key === key) {
+          found.set(key, cap);
+          log(`抓取成功：${COURSES[key].name} · 课程 ${cap.courseId || "?"} · 招募 ${cap.recruitId || "?"}`);
+        } else {
+          log(`点击 ${COURSES[key].name} 后未识别到学习页`);
+        }
+        await page.goto(listUrl, { timeout: 90000 }).catch(() => {});
+        await page.waitForTimeout(8000);
+      }
+    }
+  } catch (e) {
+    log(`课程列表抓取失败：${e.message}`);
+  }
+
+  // 2) 兜底：已经打开的课程学习页
+  const missing = Object.keys(COURSES).filter((k) => !found.has(k));
+  if (missing.length) {
+    const candidates = new Set();
+    for (const t of await task.tabs()) {
+      const m = (t.url || "").match(/recruitAndCourseId=([0-9a-f]{8,})/i);
+      if (m) candidates.add(m[1]);
+    }
+    for (const secret of [...candidates].slice(0, 8)) {
+      try {
+        await page.goto(`https://studyvideoh5.zhihuishu.com/stuStudy?recruitAndCourseId=${secret}`, { timeout: 90000 });
+        await page.waitForTimeout(5000);
+        const cap = await captureCourse(page);
+        if (cap && cap.key && missing.includes(cap.key)) {
+          found.set(cap.key, cap);
+          log(`抓取成功（已打开页面）：${COURSES[cap.key].name} · 课程 ${cap.courseId || "?"}`);
+        }
+      } catch (e) {
+        log(`抓取课程页失败：${e.message}`);
+      }
+    }
+  }
+  await page.close().catch(() => {});
+
+  let changed = false;
+  for (const [key, cap] of found) {
+    const c = COURSES[key];
+    if (c.secret !== cap.secret) changed = true;
+    c.secret = cap.secret;
+    if (cap.courseId && cap.courseId !== c.courseId) {
+      c.courseId = cap.courseId;
+      changed = true;
+    }
+    if (cap.recruitId && cap.recruitId !== c.recruitId) {
+      c.recruitId = cap.recruitId;
+      changed = true;
+    }
+  }
+  if (found.size) {
+    await saveCoursesConfig();
+    log(`课程配置已保存：${[...found.keys()].map((k) => COURSES[k].name).join("、")}${changed ? "" : "（与之前一致）"}`);
+  }
+  if (CONFIG.syncCourses === true) {
+    CONFIG.syncCourses = false;
+    try {
+      const cfg = JSON.parse(await fsp.readFile(CONFIG_FILE, "utf8"));
+      cfg.syncCourses = false;
+      await fsp.writeFile(CONFIG_FILE, JSON.stringify(cfg, null, 2), "utf8");
+    } catch {}
+  }
+  if (configIncomplete()) {
+    const names = Object.keys(COURSES)
+      .filter((k) => {
+        const c = COURSES[k];
+        return isBlankConfig(c.courseId) || isBlankConfig(c.recruitId) || isBlankConfig(c.secret);
+      })
+      .map((k) => COURSES[k].name)
+      .join("、");
+    throw new Error(`未抓取到 ${names} 的课程配置：请先在浏览器登录当前账号，打开该课程的“课程学习”页面后重试`);
+  }
+}
+
+
 async function main() {
   log(`=== ${DAY} 智慧树自动学习开始 ===`);
   state = await loadState();
@@ -964,6 +1133,7 @@ async function main() {
 
   const task = await acquireTask();
   const { studyPage, qaPage } = await pickPages(task);
+  await syncCourses(task);
 
   for (const key of ["military", "security"]) {
     const course = COURSES[key];

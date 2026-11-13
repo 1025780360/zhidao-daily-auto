@@ -28,6 +28,7 @@ panel/app.ico      面板图标
 ```
 state.json      每天的提问/回答记录与学习秒数
 status.json     面板和脚本之间的状态文件（面板每秒读取）
+courses.json    自动抓取的课程配置（课程名、courseId、recruitId、secret）
 logs/           每日日志
 ```
 
@@ -37,9 +38,20 @@ logs/           每日日志
 
 - Windows 10/11，已安装 Node.js（脚本由 ego-browser 内置的 Node 运行）
 - 已安装并登录 ego-browser，浏览器里保持智慧树账号登录
-- 两门课的 `courseId`、`recruitId`、`secret` 需要按自己的课程填写
+- 课程配置无需手动填写，脚本会自动抓取（见下一节）
 
-`secret` 是学习页地址 `https://studyvideoh5.zhihuishu.com/stuStudy?recruitAndCourseId=...` 里的参数值。仓库中已替换为占位符 `YOUR_MILITARY_SECRET` / `YOUR_SECURITY_SECRET`，使用前请从浏览器地址栏复制真实值填入 `daily.mjs` 顶部的 `COURSES`。
+## 课程配置自动抓取
+
+每次运行开始时会自动打开「在线学堂 · 我的课程」列表（`onlineweb.zhihuishu.com/onlinestuh5`），按课程名点进每门课的「课程学习」页，抓取：
+
+- 课程名、`courseId`、`recruitId`
+- 学习页地址里的 `recruitAndCourseId`（即 `secret`）
+
+抓取结果写入脚本目录下的 `courses.json`，之后的运行直接读取，切换账号后会自动覆盖为新账号的配置。`courses.json` 含账号课程信息，已在 `.gitignore` 中排除。
+
+- 如果课程列表提示未登录：先在浏览器里登录智慧树，再运行
+- 如果想强制重新抓取：在 `config.json` 里加 `"syncCourses": true`，运行一次后脚本会自动改回 `false`
+- 只有两门课都能匹配到（默认匹配「军事理论」和「国家安全」）时才会继续，否则日志会提示缺哪门课
 
 ## 运行
 

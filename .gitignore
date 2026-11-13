@@ -2,6 +2,7 @@
 state.json
 status.json
 stop.flag
+courses.json
 logs/
 *.log
 
