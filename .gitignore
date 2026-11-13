@@ -1,0 +1,16 @@
+# 运行数据
+state.json
+status.json
+stop.flag
+logs/
+*.log
+
+# 可执行文件
+*.exe
+*.ico.bak
+
+# 编辑器与工具
+.qoder/
+skills-lock.json
+Thumbs.db
+desktop.ini
