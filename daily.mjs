@@ -404,6 +404,36 @@ async function isLoginPage(page) {
   }
 }
 
+// 智慧树的登录态全是会话 Cookie（CASTGC/JSESSIONID），浏览器一重启就得重新扫码登录。
+// 把带登录态的会话 Cookie 改成持久 Cookie，重启浏览器后还能带着登录态打开。
+async function pinLoginCookies(page) {
+  try {
+    const { cookies } = await page.cdp("Network.getAllCookies");
+    const expires = Math.floor(Date.now() / 1000) + 30 * 24 * 3600;
+    let n = 0;
+    for (const c of cookies || []) {
+      if (!c.session || !/zhihuishu\.com$/.test(c.domain)) continue;
+      if (c.name === "SERVERID") continue; // 负载均衡粘性 Cookie，长期保留会黏到过期服务器
+      try {
+        await page.cdp("Network.setCookie", {
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path || "/",
+          secure: !!c.secure,
+          httpOnly: !!c.httpOnly,
+          sameSite: c.sameSite || undefined,
+          expires,
+        });
+        n++;
+      } catch {}
+    }
+    if (n) log(`已固化登录 Cookie ${n} 个（浏览器重启后不用重新登录）`);
+  } catch (e) {
+    log(`固化登录 Cookie 失败：${e.message}`);
+  }
+}
+
 async function safeClick(page, selector, label) {
   try {
     await page.click(selector, { label });
@@ -1134,6 +1164,7 @@ async function main() {
   const task = await acquireTask();
   const { studyPage, qaPage } = await pickPages(task);
   await syncCourses(task);
+  await pinLoginCookies(studyPage);
 
   for (const key of ["military", "security"]) {
     const course = COURSES[key];
@@ -1195,6 +1226,7 @@ async function main() {
     await saveState(state);
   }
 
+  await pinLoginCookies(qaPage);
   dayState.updatedAt = new Date().toISOString();
   await saveState(state);
   await writeStatus({
